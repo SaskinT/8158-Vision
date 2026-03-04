@@ -1,13 +1,6 @@
 """
 AprilTag 36h11 - Kamera + Uzaklık Ölçümü
-==========================================
-Kurulum:
-    pip install opencv-python pupil-apriltags numpy
-
-Çalıştırma:
-    python apriltag_kamera.py
-
-NOT: Doğru uzaklık için TAG_BOYUTU ve KAMERA_FOV değerlerini ayarla.
+=========================================
 """
 
 import cv2
