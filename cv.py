@@ -1,13 +1,16 @@
 """
-AprilTag 36h11 - Kamera + Uzaklık Ölçümü
-==========================================
+AprilTag 36h11 - Kamera + Uzaklık + Açı Hesaplama
+====================================================
 Kurulum:
     pip install opencv-python pupil-apriltags numpy
 
 Çalıştırma:
     python apriltag_kamera.py
 
-NOT: Doğru uzaklık için TAG_BOYUTU ve KAMERA_FOV değerlerini ayarla.
+Açı Tanımları:
+    Yaw   (Yatay açı)   : Tag'in kameraya göre sağ/sol açısı
+    Pitch (Dikey açı)   : Tag'in kameraya göre yukarı/aşağı açısı
+    Roll  (Dönme açısı) : Tag'in kendi ekseni etrafındaki dönüşü
 """
 
 import cv2
@@ -22,31 +25,24 @@ except ImportError:
 
 
 # ══════════════════════════════════════════════════════
-#  AYARLAR — Bunları kendi durumuna göre değiştir
+#  AYARLAR
 # ══════════════════════════════════════════════════════
-KAMERA_ID   = 0       # Kamera numarası (0 = dahili, 1 = USB)
-GENISLIK    = 1280    # Çözünürlük genişliği
-YUKSEKLIK   = 720     # Çözünürlük yüksekliği
-DECIMATION  = 2.0     # 1.0 = hassas&yavaş | 2.0 = hızlı (önerilen)
-
-# Tag fiziksel boyutu (metre cinsinden — siyah karenin dış kenarı)
-# Örnek: 15 cm'lik tag → 0.15
-TAG_BOYUTU  = 0.15    # metre
-
-# Kamera yatay görüş açısı (derece) — çoğu webcam ~60-70 derece
+KAMERA_ID   = 0
+GENISLIK    = 1280
+YUKSEKLIK   = 720
+DECIMATION  = 2.0
+TAG_BOYUTU  = 0.055    # metre (siyah karenin dış kenarı)
 KAMERA_FOV  = 65.0    # derece
 # ══════════════════════════════════════════════════════
 
 
-# Odak uzaklığını FOV'dan tahmin et (piksel cinsinden)
+# Kamera iç parametreleri
 f_px = (GENISLIK / 2.0) / np.tan(np.radians(KAMERA_FOV / 2.0))
-
 kamera_matrisi = np.array([
     [f_px,   0,  GENISLIK  / 2.0],
     [0,    f_px, YUKSEKLIK / 2.0],
     [0,       0,             1.0]
 ], dtype=np.float64)
-
 dist_coeffs = np.zeros((4, 1))
 
 
@@ -61,8 +57,12 @@ detector = Detector(
 )
 
 
-def uzaklik_hesapla(tag):
-    """Tag köşelerinden PnP çözümü ile uzaklık hesaplar (metre)."""
+# ── Pose hesaplama ────────────────────────────────────────────────────────────
+def pose_hesapla(tag):
+    """
+    PnP ile tag'in 3D konumunu ve açısını hesaplar.
+    Döner: uzaklık (m), yaw (°), pitch (°), roll (°), rvec, tvec
+    """
     yari = TAG_BOYUTU / 2.0
     obj_pts = np.array([
         [-yari,  yari, 0],
@@ -71,96 +71,160 @@ def uzaklik_hesapla(tag):
         [-yari, -yari, 0],
     ], dtype=np.float64)
 
-    img_pts = tag.corners.astype(np.float64)
-
     basari, rvec, tvec = cv2.solvePnP(
-        obj_pts, img_pts, kamera_matrisi, dist_coeffs,
+        obj_pts, tag.corners.astype(np.float64),
+        kamera_matrisi, dist_coeffs,
         flags=cv2.SOLVEPNP_IPPE_SQUARE
     )
-
     if not basari:
-        return None, None, None
+        return None, None, None, None, None, None
 
-    return float(np.linalg.norm(tvec)), rvec, tvec
+    # Uzaklık
+    uzaklik = float(np.linalg.norm(tvec))
+
+    # Rotation matrix → Euler açıları
+    R, _ = cv2.Rodrigues(rvec)
+
+    # Yaw (sağ/sol), Pitch (yukarı/aşağı), Roll (dönüş)
+    pitch = np.degrees(np.arctan2(-R[2, 0], np.sqrt(R[2, 1]**2 + R[2, 2]**2)))
+    yaw   = np.degrees(np.arctan2(R[1, 0], R[0, 0]))
+    roll  = np.degrees(np.arctan2(R[2, 1], R[2, 2]))
+
+    # Kameraya göre yatay ve dikey açı (merkez noktasından)
+    tx, ty, tz = tvec[0][0], tvec[1][0], tvec[2][0]
+    aci_yatay  = np.degrees(np.arctan2(tx, tz))   # sağ + / sol -
+    aci_dikey  = np.degrees(np.arctan2(-ty, tz))  # yukarı + / aşağı -
+
+    return uzaklik, yaw, pitch, roll, aci_yatay, aci_dikey, rvec, tvec
 
 
-def renk_uzakliga_gore(metre):
-    """Yakın = kırmızı, orta = sarı, uzak = yeşil."""
-    if metre < 0.5:
-        return (0, 60, 255)
-    elif metre < 1.5:
-        return (0, 200, 255)
+# ── Yardımcı ─────────────────────────────────────────────────────────────────
+def renk_uzakliga_gore(m):
+    if m < 0.5:   return (0, 60, 255)
+    elif m < 1.5: return (0, 200, 255)
+    else:         return (0, 255, 80)
+
+
+def aci_cubugu_ciz(frame, x, y, genislik, aci, max_aci, etiket, renk):
+    """Küçük açı göstergesi çizer."""
+    yukseklik = 10
+    dolu = int(abs(aci) / max_aci * genislik / 2)
+    dolu = min(dolu, genislik // 2)
+    orta = x + genislik // 2
+
+    # Arka plan
+    cv2.rectangle(frame, (x, y), (x + genislik, y + yukseklik), (40, 40, 40), -1)
+    # Orta çizgi
+    cv2.line(frame, (orta, y), (orta, y + yukseklik), (100, 100, 100), 1)
+    # Dolgu (sağa veya sola)
+    if aci >= 0:
+        cv2.rectangle(frame, (orta, y), (orta + dolu, y + yukseklik), renk, -1)
     else:
-        return (0, 255, 80)
+        cv2.rectangle(frame, (orta - dolu, y), (orta, y + yukseklik), renk, -1)
+    # Etiket
+    cv2.putText(frame, f"{etiket}: {aci:+.1f}°",
+                (x, y - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.45, renk, 1)
 
 
-# Kamerayı aç
+def bilgi_kutusu_ciz(frame, x, y, uzaklik, yaw, pitch, roll, aci_yatay, aci_dikey, renk):
+    """Tag üzerinde yarı şeffaf bilgi paneli çizer."""
+    satir_y = [y, y+20, y+40, y+60, y+80, y+100]
+
+    ov = frame.copy()
+    cv2.rectangle(ov, (x - 6, y - 16), (x + 175, y + 110), (0, 0, 0), -1)
+    cv2.addWeighted(ov, 0.5, frame, 0.5, 0, frame)
+
+    cm = uzaklik * 100
+    uzaklik_yazi = f"{cm:.1f} cm" if cm < 100 else f"{uzaklik:.2f} m"
+
+    satirlar = [
+        (f"Uzaklik : {uzaklik_yazi}",       renk),
+        (f"Yatay   : {aci_yatay:+.1f} deg", (100, 220, 255)),
+        (f"Dikey   : {aci_dikey:+.1f} deg", (255, 200, 100)),
+        (f"Yaw     : {yaw:+.1f} deg",       (180, 255, 180)),
+        (f"Pitch   : {pitch:+.1f} deg",     (255, 180, 255)),
+        (f"Roll    : {roll:+.1f} deg",      (255, 255, 150)),
+    ]
+    for i, (metin, r) in enumerate(satirlar):
+        cv2.putText(frame, metin, (x, satir_y[i]),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.48, r, 1)
+
+
+# ── Kamerayı Aç ───────────────────────────────────────────────────────────────
 cap = cv2.VideoCapture(KAMERA_ID)
 if not cap.isOpened():
-    print(f"HATA: Kamera {KAMERA_ID} açılamadı. KAMERA_ID'yi değiştir.")
+    print(f"HATA: Kamera {KAMERA_ID} açılamadı.")
     sys.exit(1)
-
 cap.set(cv2.CAP_PROP_FRAME_WIDTH,  GENISLIK)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, YUKSEKLIK)
-
-print("Kamera acildi! Cikmak icin 'q' tusuna bas.\n")
+print("Kamera acildi! Cikmak icin 'q' bas.\n")
 
 onceki_ids = set()
 
+# ── Ana Döngü ─────────────────────────────────────────────────────────────────
 while True:
     ret, frame = cap.read()
     if not ret:
-        print("HATA: Goruntu alinamadi.")
         break
 
     gri  = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     tags = detector.detect(gri)
 
-    # Terminal çıktısı (sadece değişince)
+    # Terminal (değişince)
     simdi_ids = {t.tag_id for t in tags}
     if simdi_ids != onceki_ids:
+        print(f"{len(tags)} tag:" if tags else "  [Tag yok]")
         onceki_ids = simdi_ids
 
+    # Merkez yatay/dikey referans çizgileri
+    cv2.line(frame, (GENISLIK//2, 0), (GENISLIK//2, YUKSEKLIK), (60, 60, 60), 1)
+    cv2.line(frame, (0, YUKSEKLIK//2), (GENISLIK, YUKSEKLIK//2), (60, 60, 60), 1)
+
     for tag in tags:
-        uzaklik, rvec, tvec = uzaklik_hesapla(tag)
+        sonuc = pose_hesapla(tag)
+        if sonuc[0] is None:
+            continue
+        uzaklik, yaw, pitch, roll, aci_yatay, aci_dikey, rvec, tvec = sonuc
+
         koseler = tag.corners.astype(int)
         merkez  = tag.center.astype(int)
-        renk    = renk_uzakliga_gore(uzaklik) if uzaklik else (0, 255, 0)
+        renk    = renk_uzakliga_gore(uzaklik)
 
-        # Çerçeve çiz
+        # Çerçeve
         for i in range(4):
             cv2.line(frame, tuple(koseler[i]), tuple(koseler[(i+1) % 4]), renk, 2)
-
-        # Köşe noktaları (0. köşe kırmızı)
         for j, k in enumerate(koseler):
             cv2.circle(frame, tuple(k), 5,
-                       (0, 0, 255) if j == 0 else (200, 100, 0), -1)
-
-        # Merkez noktası
+                       (0, 0, 255) if j == 0 else (180, 80, 0), -1)
         cv2.circle(frame, tuple(merkez), 4, renk, -1)
 
-        # 3D eksen çizgisi
-        if rvec is not None:
-            cv2.drawFrameAxes(frame, kamera_matrisi, dist_coeffs,
-                              rvec, tvec, TAG_BOYUTU * 0.5)
+        # 3D eksen
+        cv2.drawFrameAxes(frame, kamera_matrisi, dist_coeffs,
+                          rvec, tvec, TAG_BOYUTU * 0.5)
 
-        # Bilgi kutusu
-        if uzaklik is not None:
-            cm = uzaklik * 100
-            uzaklik_yazi = f"{cm:.1f} cm" if cm < 100 else f"{uzaklik:.2f} m"
+        # Kameradan tag merkezine çizgi
+        cam_merkez = (GENISLIK // 2, YUKSEKLIK // 2)
+        cv2.line(frame, cam_merkez, tuple(merkez), (80, 80, 80), 1)
 
-            x, y = merkez[0] - 60, merkez[1] - 55
-            overlay = frame.copy()
-            cv2.rectangle(overlay, (x - 4, y - 22), (x + 140, y + 32), (0, 0, 0), -1)
-            cv2.addWeighted(overlay, 0.45, frame, 0.55, 0, frame)
+        # Açı çubuğu göstergeleri (sol alt)
+        panel_x, panel_y = 20, YUKSEKLIK - 80
+        aci_cubugu_ciz(frame, panel_x, panel_y,      200, aci_yatay, 45,
+                       "Yatay ", (100, 220, 255))
+        aci_cubugu_ciz(frame, panel_x, panel_y + 30, 200, aci_dikey, 45,
+                       "Dikey ", (255, 200, 100))
 
-            cv2.putText(frame, f"ID: {tag.tag_id}",
-                        (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2)
-            cv2.putText(frame, f"Uzaklik: {uzaklik_yazi}",
-                        (x, y + 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, renk, 2)
+        # Bilgi kutusu (tag yanında)
+        bx = min(merkez[0] + 20, GENISLIK - 185)
+        by = max(merkez[1] - 20, 20)
+        bilgi_kutusu_ciz(frame, bx, by, uzaklik, yaw, pitch, roll,
+                         aci_yatay, aci_dikey, renk)
 
-            print(f"  ID={tag.tag_id}  |  Uzaklik={uzaklik_yazi}  |  "
-                  f"Merkez=({merkez[0]}, {merkez[1]})")
+        # Terminal
+        cm = uzaklik * 100
+        print(f"  ID={tag.tag_id} | "
+              f"Uzaklik={'%5.1fcm'%cm if cm<100 else '%.2fm'%uzaklik} | "
+              f"Yatay={aci_yatay:+6.1f}° | Dikey={aci_dikey:+6.1f}° | "
+              f"Yaw={yaw:+6.1f}° | Pitch={pitch:+6.1f}° | Roll={roll:+6.1f}°")
 
     # Üst bilgi bandı
     ov2 = frame.copy()
@@ -168,11 +232,10 @@ while True:
     cv2.addWeighted(ov2, 0.5, frame, 0.5, 0, frame)
     cv2.putText(frame,
                 f"AprilTag 36h11  |  Tag: {len(tags)}  |  "
-                f"Tag boyutu: {TAG_BOYUTU*100:.0f}cm  |  Q=cikis",
+                f"Boyut: {TAG_BOYUTU*100:.0f}cm  |  Q=cikis",
                 (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
 
-    cv2.imshow("AprilTag - Uzaklik Olcumu", frame)
-
+    cv2.imshow("AprilTag - Uzaklik & Aci", frame)
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
