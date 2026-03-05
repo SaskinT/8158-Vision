@@ -16,6 +16,7 @@ Açı Tanımları:
 import cv2
 import numpy as np
 import sys
+import time
 
 try:
     from pupil_apriltags import Detector
@@ -55,6 +56,10 @@ detector = Detector(
     refine_edges=1,
     decode_sharpening=0.25,
 )
+
+fps = 0
+timerStart = False
+startTime = 0
 
 
 # ── Pose hesaplama ────────────────────────────────────────────────────────────
@@ -164,8 +169,14 @@ onceki_ids = set()
 # ── Ana Döngü ─────────────────────────────────────────────────────────────────
 while True:
     ret, frame = cap.read()
+
     if not ret:
         break
+
+    if frame.any():
+        fps +=1
+        if timerStart:
+            startTime = time.time()
 
     gri  = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     tags = detector.detect(gri)
@@ -232,7 +243,7 @@ while True:
     cv2.addWeighted(ov2, 0.5, frame, 0.5, 0, frame)
     cv2.putText(frame,
                 f"AprilTag 36h11  |  Tag: {len(tags)}  |  "
-                f"Boyut: {TAG_BOYUTU*100:.0f}cm  |  Q=cikis",
+                f"Boyut: {TAG_BOYUTU*100:.0f}cm  |  Q=cikis | Frames : {int(fps)} | Time: {time.time - startTime}",
                 (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
 
     cv2.imshow("AprilTag - Uzaklik & Aci", frame)
