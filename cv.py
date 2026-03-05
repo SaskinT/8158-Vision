@@ -61,7 +61,6 @@ fps = 0
 timerStart = False
 startTime = 0
 
-
 # ── Pose hesaplama ────────────────────────────────────────────────────────────
 def pose_hesapla(tag):
     """
