@@ -57,8 +57,8 @@ detector = Detector(
     decode_sharpening=0.25,
 )
 
-fps = 0
-timerStart = False
+framecount = 0
+timerStart = True
 startTime = 0
 
 # ── Pose hesaplama ────────────────────────────────────────────────────────────
@@ -152,6 +152,16 @@ def bilgi_kutusu_ciz(frame, x, y, uzaklik, yaw, pitch, roll, aci_yatay, aci_dike
     for i, (metin, r) in enumerate(satirlar):
         cv2.putText(frame, metin, (x, satir_y[i]),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.48, r, 1)
+        
+def fps_olcer():
+    try:
+        framerate = int(framecount) / int(int(time.time()) - int(startTime))
+    except:
+        framerate = 0  
+
+    return int(framerate)
+
+
 
 
 # ── Kamerayı Aç ───────────────────────────────────────────────────────────────
@@ -172,10 +182,12 @@ while True:
     if not ret:
         break
 
-    if frame.any():
-        fps +=1
-        if timerStart:
-            startTime = time.time()
+
+    framecount +=1
+    if timerStart:
+        startTime = time.time()
+        timerStart = False
+
 
     gri  = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     tags = detector.detect(gri)
@@ -242,7 +254,7 @@ while True:
     cv2.addWeighted(ov2, 0.5, frame, 0.5, 0, frame)
     cv2.putText(frame,
                 f"AprilTag 36h11  |  Tag: {len(tags)}  |  "
-                f"Boyut: {TAG_BOYUTU*100:.0f}cm  |  Q=cikis | Frames : {int(fps)} | Time: {time.time - startTime}",
+                f"Boyut: {TAG_BOYUTU*100:.0f}cm  |  Q=cikis | Frames : {int(framecount)} | Time: {int(time.time()) - int(startTime)} | FPS: {fps_olcer()}",
                 (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
 
     cv2.imshow("AprilTag - Uzaklik & Aci", frame)
